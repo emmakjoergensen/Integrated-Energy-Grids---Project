@@ -68,14 +68,12 @@ def annualized_fixed_cost(costs, tech, discount_rate=DISCOUNT_RATE):
     investment = get_cost(costs, tech, "investment") * 1000
     lifetime = get_cost(costs, tech, "lifetime")
     fom = get_cost(costs, tech, "FOM") / 100 * investment
-
     return investment * annuity(discount_rate, lifetime) + fom
 
 
 def annualized_cost_no_fom(costs, tech, discount_rate=DISCOUNT_RATE):
     investment = get_cost(costs, tech, "investment") * 1000
     lifetime = get_cost(costs, tech, "lifetime")
-
     return investment * annuity(discount_rate, lifetime)
 
 
@@ -116,6 +114,7 @@ def battery_capital_cost(costs):
     inverter_cost = annualized_fixed_cost(costs, "battery inverter")
     storage_cost = annualized_cost_no_fom(costs, "battery storage")
 
+    # Kept consistent with your Task D version.
     return inverter_cost + storage_cost
 
 
@@ -240,8 +239,6 @@ def add_zone(network, zone, costs):
 
     gen = pivot_generation(zone)
 
-    # Existing capacity proxy from historical max generation
-    # Used as lower bound to keep current assets in the system.
     if "wind_on" in gen.columns and gen["wind_on"].sum() > 0:
         existing_capacity = gen["wind_on"].max()
 
@@ -365,8 +362,6 @@ def add_lines(network):
 
 
 def build_network(costs):
-    load_ref = pivot_load("DK1")
-
     snapshots = pd.date_range(
         f"{YEAR}-01-01 00:00",
         f"{YEAR}-12-31 23:00",
@@ -389,7 +384,7 @@ def build_network(costs):
 
 
 # ============================================================
-# Plotting and result functions
+# Results and plotting
 # ============================================================
 
 def installed_capacity_table(network, include_storage=True):
@@ -404,7 +399,6 @@ def installed_capacity_table(network, include_storage=True):
         storage_capacity["capacity_MW"] = storage_capacity["p_nom_opt"].clip(lower=0)
         storage_capacity["country"] = storage_capacity["bus"].str.replace("bus_", "", regex=False)
         storage_capacity["carrier"] = "battery"
-
         frames.append(storage_capacity[["country", "carrier", "capacity_MW"]])
 
     combined = pd.concat(frames)
@@ -423,7 +417,7 @@ def plot_installed_capacity(network):
     print("\n--- Installed capacity by country and technology [MW] ---")
     print(table.round(2))
 
-    ax = table.plot(kind="bar", stacked=True, figsize=(10, 6))
+    table.plot(kind="bar", stacked=True, figsize=(10, 6))
 
     plt.ylabel("Installed capacity [MW]")
     plt.xlabel("Country")
@@ -464,7 +458,7 @@ def plot_battery_behavior(network, zone):
 
 
 def plot_line_flows(network):
-    ax = network.lines_t.p0.plot(figsize=(12, 5))
+    network.lines_t.p0.plot(figsize=(12, 5))
 
     plt.axhline(0, linewidth=1)
     plt.ylabel("MW")
@@ -526,50 +520,31 @@ def print_results(network):
     print("\n--- Average annual electricity price by bus [€/MWh] ---")
     print(network.buses_t.marginal_price.mean().round(2))
 
-    print("\n--- Net injection by bus, first 5 hours [MW] ---")
-
-    gen_by_bus_ts = (
-        network.generators_t.p.T
-        .groupby(network.generators.bus)
-        .sum()
-        .T
-    )
-
-    load_by_bus_ts = (
-        network.loads_t.p.T
-        .groupby(network.loads.bus)
-        .sum()
-        .T
-    )
-
-    net_injection = gen_by_bus_ts.sub(load_by_bus_ts, fill_value=0)
-
-    print(net_injection.head().round(2))
-
 
 # ============================================================
 # Run Task D
 # ============================================================
 
-costs = load_costs(os.path.join(DATA_DIR, "costs_PyPSA.csv"), year=COST_YEAR)
+if __name__ == "__main__":
+    costs = load_costs(os.path.join(DATA_DIR, "costs_PyPSA.csv"), year=COST_YEAR)
 
-print("\n--- Mean renewable capacity factors from profiles ---")
-print(mean_capacity_factors().round(3))
+    print("\n--- Mean renewable capacity factors from profiles ---")
+    print(mean_capacity_factors().round(3))
 
-multi_n = build_network(costs)
+    multi_n = build_network(costs)
 
-print("\n--- Initial lines ---")
-print(multi_n.lines[["bus0", "bus1", "x", "r", "s_nom"]])
+    print("\n--- Initial lines ---")
+    print(multi_n.lines[["bus0", "bus1", "x", "r", "s_nom"]])
 
-multi_n.optimize(
-    extra_functionality=hydro_energy_constraint_no2,
-)
+    multi_n.optimize(
+        extra_functionality=hydro_energy_constraint_no2,
+    )
 
-print_results(multi_n)
+    print_results(multi_n)
 
-plot_installed_capacity(multi_n)
-plot_battery_behavior(multi_n, "DK1")
-plot_battery_behavior(multi_n, "DE")
-plot_battery_behavior(multi_n, "DK2")
-plot_battery_behavior(multi_n, "NO2")
-plot_line_flows(multi_n)
+    plot_installed_capacity(multi_n)
+
+    for zone in ZONES:
+        plot_battery_behavior(multi_n, zone)
+
+    plot_line_flows(multi_n)
