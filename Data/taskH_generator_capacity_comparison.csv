@@ -1,0 +1,18 @@
+name,Baseline [MW],CO2 constrained [MW]
+wind_on_DK1,8054.4,8054.4
+wind_off_DK1,6300.59,6300.59
+solar_DK1,5470.77,5470.77
+wind_on_DK2,1268.9,1268.9
+wind_off_DK2,3109.45,3109.45
+solar_DK2,1997.69,1997.69
+wind_on_NO2,3994.06,3994.06
+wind_off_NO2,16.3,16.3
+hydro_res_NO2,27820.76,27820.76
+wind_on_DE,97836.83,97836.83
+wind_off_DE,190025.26,206852.15
+solar_DE,347000.33,357092.22
+coal_DE,68495.07,68495.07
+CH4_supply_DK1,-0.0,-0.0
+CH4_supply_DK2,2828.82,2828.82
+CH4_supply_NO2,2970.0,2970.0
+CH4_supply_DE,202497.96,196392.49

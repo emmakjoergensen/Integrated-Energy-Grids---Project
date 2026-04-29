@@ -1,0 +1,6 @@
+name,mean_capacity_MW,std_capacity_MW,min_capacity_MW,max_capacity_MW
+solar,4030.46,167.01,3911.5,4350.41
+onshore_wind,481.21,524.8,-0.0,1224.38
+offshore_wind,3078.14,246.41,2734.47,3323.15
+ocgt,3274.96,111.18,3094.55,3437.62
+battery storage,289.02,99.21,188.81,476.97
