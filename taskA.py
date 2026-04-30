@@ -33,7 +33,7 @@ def annuity(rate, lifetime):
 
 
 def cost_breakdown(costs, tech, discount_rate=DISCOUNT_RATE):
-    investment = get_cost(costs, tech, "investment") * 1000  # €/MW
+    investment = get_cost(costs, tech, "investment") * 1000
     lifetime = get_cost(costs, tech, "lifetime")
     fom_percent = get_cost(costs, tech, "FOM")
 
@@ -57,15 +57,15 @@ def ocgt_marginal_cost(costs):
     efficiency = get_cost(costs, "OCGT", "efficiency")
     vom = get_cost(costs, "OCGT", "VOM")
 
-    gas_price = 40.0       # €/MWh_th
-    co2_price = 80.0       # €/tCO2
-    co2_intensity = 0.202  # tCO2/MWh_th
+    gas_price = 40.0
+    co2_price = 80.0
+    co2_intensity = 0.202
 
-    return (
-        gas_price / efficiency
-        + co2_price * co2_intensity / efficiency
-        + vom
-    )
+    return gas_price / efficiency + co2_price * co2_intensity / efficiency + vom
+
+
+def filter_year(df, time_col, year):
+    return df[df[time_col].dt.year == year].copy()
 
 
 def build_renewable_profile(generation, psr_codes, snapshots, target_cf):
@@ -90,13 +90,34 @@ snapshots = pd.date_range(
     freq="h"
 )
 
-generation_path = os.path.join(RAW_DIR, "generation", f"gen_{ZONE}_{YEAR}.csv")
-load_path = os.path.join(RAW_DIR, "load", f"load_{ZONE}_{YEAR}.csv")
+generation_path = os.path.join(
+    RAW_DIR,
+    "generation",
+    f"gen_{ZONE}_2020_2025.csv"
+)
+
+solar_generation_path = os.path.join(
+    RAW_DIR,
+    "generation",
+    f"solar_{ZONE}_2020_2025.csv"
+)
+
+load_path = os.path.join(
+    RAW_DIR,
+    "load",
+    f"load_{ZONE}_2020_2025.csv"
+)
+
 cost_path = os.path.join(DATA_DIR, "costs_PyPSA.csv")
 
-generation = load_generation(generation_path)
-load_data = load_load(load_path)
+generation_all = load_generation(generation_path)
+solar_generation_all = load_generation(solar_generation_path)
+load_all = load_load(load_path)
 costs = load_costs(cost_path, year=2030)
+
+generation = filter_year(generation_all, "time_utc", YEAR)
+solar_generation = filter_year(solar_generation_all, "time_utc", YEAR)
+load_data = filter_year(load_all, "time_utc", YEAR)
 
 load = (
     load_data
@@ -112,7 +133,7 @@ load = (
 # ============================================================
 
 solar_cf = build_renewable_profile(
-    generation,
+    solar_generation,
     PSR_MAP["solar"],
     snapshots,
     target_cf=0.11
@@ -131,6 +152,11 @@ offshore_cf = build_renewable_profile(
     snapshots,
     target_cf=0.52
 )
+
+print("\nRenewable profile means:")
+print("Solar CF mean:", solar_cf.mean())
+print("Onshore CF mean:", onshore_cf.mean())
+print("Offshore CF mean:", offshore_cf.mean())
 
 
 # ============================================================
@@ -152,41 +178,31 @@ ocgt_costs = cost_breakdown(costs, "OCGT")
 
 cost_table = pd.DataFrame({
     "Technology": ["Solar PV", "Onshore wind", "Offshore wind", "OCGT"],
-
     "Investment CAPEX [€/MW]": [
         solar_costs["investment"],
         onshore_costs["investment"],
         offshore_costs["investment"],
         ocgt_costs["investment"],
     ],
-
     "Annualized CAPEX [€/MW/year]": [
         solar_costs["annualized_capex"],
         onshore_costs["annualized_capex"],
         offshore_costs["annualized_capex"],
         ocgt_costs["annualized_capex"],
     ],
-
     "Fixed OPEX [€/MW/year]": [
         solar_costs["fixed_opex"],
         onshore_costs["fixed_opex"],
         offshore_costs["fixed_opex"],
         ocgt_costs["fixed_opex"],
     ],
-
     "Total fixed cost [€/MW/year]": [
         solar_costs["total_fixed_cost"],
         onshore_costs["total_fixed_cost"],
         offshore_costs["total_fixed_cost"],
         ocgt_costs["total_fixed_cost"],
     ],
-
-    "Marginal cost [€/MWh]": [
-        0,
-        0,
-        0,
-        ocgt_mc,
-    ],
+    "Marginal cost [€/MWh]": [0, 0, 0, ocgt_mc],
 }).round(2)
 
 print("\nCost assumptions:")
@@ -200,12 +216,7 @@ print(cost_table.to_string(index=False))
 network = create_network(snapshots)
 
 network.add("Carrier", "AC")
-
-network.add(
-    "Bus",
-    ZONE,
-    carrier="AC"
-)
+network.add("Bus", ZONE, carrier="AC")
 
 network.add(
     "Load",
@@ -322,7 +333,6 @@ plt.savefig(os.path.join(FIG_DIR, "taskA_annual_mix.png"), dpi=300)
 plt.show()
 
 plt.figure(figsize=(10, 5))
-
 for tech in dispatch.columns:
     dispatch[tech].sort_values(ascending=False).reset_index(drop=True).plot(label=tech)
 

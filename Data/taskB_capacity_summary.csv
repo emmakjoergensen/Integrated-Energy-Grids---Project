@@ -1,5 +1,5 @@
 name,mean_capacity_MW,std_capacity_MW,min_capacity_MW,max_capacity_MW
-solar,3789.07,103.31,3663.44,3955.52
-onshore_wind,644.28,681.59,-0.0,1680.89
-offshore_wind,2991.85,328.28,2485.76,3325.48
-ocgt,3563.39,48.83,3480.51,3626.6
+solar,3643.06,273.92,3233.72,3928.4
+onshore_wind,1533.4,2259.43,-0.0,5964.72
+offshore_wind,2604.46,975.13,693.24,3267.36
+ocgt,3548.36,58.63,3462.69,3615.23

@@ -3,17 +3,18 @@ import pandas as pd
 import pypsa
 import matplotlib.pyplot as plt
 
-pd.options.future.infer_string = False
-
-from src.config import YEAR, ZONE, DISCOUNT_RATE
-from src.data_loader import load_load
+from src.config import YEAR, ZONE, DISCOUNT_RATE, PSR_MAP
+from src.data_loader import load_generation, load_load
 from src.cost_loader import load_costs, get_cost
 from src.profiles import make_profile
 from src.network_builder import create_network
+from src.plotting import plot_dispatch
+
+pd.options.future.infer_string = False
 
 
 # ============================================================
-# Paths and settings
+# Paths
 # ============================================================
 
 DATA_DIR = "Data"
@@ -21,24 +22,6 @@ RAW_DIR = os.path.join(DATA_DIR, "raw")
 FIG_DIR = "Figures"
 
 os.makedirs(FIG_DIR, exist_ok=True)
-
-WEATHER_YEARS = [2020, 2021, 2022, 2023, 2024, 2025]
-PLOT_YEAR = 2025
-
-BATTERY_NAME = "battery storage"
-
-TARGET_CF = {
-    "solar": 0.11,
-    "onshore_wind": 0.25,
-    "offshore_wind": 0.52,
-}
-
-BATTERY = {
-    "duration": 4,
-    "efficiency_store": 0.95,
-    "efficiency_dispatch": 0.95,
-    "marginal_cost": 0.0,
-}
 
 
 # ============================================================
@@ -49,12 +32,31 @@ def annuity(rate, lifetime):
     return rate / (1 - (1 + rate) ** (-lifetime))
 
 
-def annualized_fixed_cost(costs, tech, discount_rate=DISCOUNT_RATE):
+def cost_breakdown(costs, tech, discount_rate=DISCOUNT_RATE):
     investment = get_cost(costs, tech, "investment") * 1000
     lifetime = get_cost(costs, tech, "lifetime")
-    fom = get_cost(costs, tech, "FOM") / 100 * investment
+    fom_percent = get_cost(costs, tech, "FOM")
 
-    return investment * annuity(discount_rate, lifetime) + fom
+    annualized_capex = investment * annuity(discount_rate, lifetime)
+    fixed_opex = fom_percent / 100 * investment
+    total_fixed_cost = annualized_capex + fixed_opex
+
+    return {
+        "investment": investment,
+        "annualized_capex": annualized_capex,
+        "fixed_opex": fixed_opex,
+        "total_fixed_cost": total_fixed_cost,
+    }
+
+
+def annualized_cost(costs, tech, discount_rate=DISCOUNT_RATE):
+    return cost_breakdown(costs, tech, discount_rate)["total_fixed_cost"]
+
+
+def annualized_cost_no_fom(costs, tech, discount_rate=DISCOUNT_RATE):
+    investment = get_cost(costs, tech, "investment") * 1000
+    lifetime = get_cost(costs, tech, "lifetime")
+    return investment * annuity(discount_rate, lifetime)
 
 
 def ocgt_marginal_cost(costs):
@@ -65,189 +67,38 @@ def ocgt_marginal_cost(costs):
     co2_price = 80.0
     co2_intensity = 0.202
 
-    return (
-        gas_price / efficiency
-        + co2_price * co2_intensity / efficiency
-        + vom
+    return gas_price / efficiency + co2_price * co2_intensity / efficiency + vom
+
+
+def filter_year(df, time_col, year):
+    return df[df[time_col].dt.year == year].copy()
+
+
+def build_renewable_profile(generation, psr_codes, snapshots, target_cf):
+    series = (
+        generation[generation["psr_type"].isin(psr_codes)]
+        .groupby("time_utc")["generation_MW"]
+        .sum()
+        .reindex(snapshots)
+        .fillna(0)
     )
 
-
-def read_weather_data(path):
-    df = pd.read_csv(path, sep=";", decimal=",")
-    df["HourUTC"] = pd.to_datetime(df["HourUTC"], utc=True, errors="coerce")
-    df["HourUTC"] = df["HourUTC"].dt.tz_convert(None)
-
-    return (
-        df.dropna(subset=["HourUTC"])
-        .set_index("HourUTC")
-        .sort_index()
-    )
+    return make_profile(series, target_cf)
 
 
-def get_generation_series(df_year):
-    solar = (
-        pd.to_numeric(df_year["SolarPowerLt10kW_MWh"], errors="coerce").fillna(0)
-        + pd.to_numeric(df_year["SolarPowerGe10Lt40kW_MWh"], errors="coerce").fillna(0)
-        + pd.to_numeric(df_year["SolarPowerGe40kW_MWh"], errors="coerce").fillna(0)
-    )
+def plot_dispatch_with_battery(network, period, title, savepath):
+    dispatch = network.generators_t.p[
+        ["solar", "onshore_wind", "offshore_wind", "ocgt"]
+    ].copy()
 
-    onshore = (
-        pd.to_numeric(df_year["OnshoreWindLt50kW_MWh"], errors="coerce").fillna(0)
-        + pd.to_numeric(df_year["OnshoreWindGe50kW_MWh"], errors="coerce").fillna(0)
-    )
+    load_ts = network.loads_t.p[f"{ZONE}_load"].copy()
+    battery_p = network.storage_units_t.p["battery"].copy()
 
-    offshore = (
-        pd.to_numeric(df_year["OffshoreWindLt100MW_MWh"], errors="coerce").fillna(0)
-        + pd.to_numeric(df_year["OffshoreWindGe100MW_MWh"], errors="coerce").fillna(0)
-    )
-
-    return {
-        "solar": solar,
-        "onshore_wind": onshore,
-        "offshore_wind": offshore,
-    }
-
-
-def prepare_weather_profiles(df_weather, weather_year, snapshots):
-    df_year = df_weather[df_weather.index.year == weather_year].copy()
-
-    if df_year.empty:
-        raise ValueError(f"No data found for {weather_year}")
-
-    full_index = pd.date_range(
-        f"{weather_year}-01-01 00:00",
-        f"{weather_year}-12-31 23:00",
-        freq="h",
-    )
-
-    df_year = df_year.groupby(df_year.index).first()
-    df_year = df_year.reindex(full_index)
-
-    generation = get_generation_series(df_year)
-
-    profiles = {}
-
-    for tech, series in generation.items():
-        profile = make_profile(series, TARGET_CF[tech])
-
-        if len(profile) > len(snapshots):
-            profile = profile.iloc[:len(snapshots)]
-
-        profile.index = snapshots
-        profiles[tech] = profile.astype("float64")
-
-    return profiles
-
-
-def annualized_cost_no_fom(costs, tech, discount_rate=DISCOUNT_RATE):
-    investment = get_cost(costs, tech, "investment") * 1000
-    lifetime = get_cost(costs, tech, "lifetime")
-
-    return investment * annuity(discount_rate, lifetime)
-
-
-def get_battery_cost(costs):
-    inverter_cost = annualized_fixed_cost(costs, "battery inverter")
-
-    storage_energy_cost = annualized_cost_no_fom(
-        costs,
-        "battery storage"
-    )
-
-    total_battery_cost = (
-        inverter_cost
-        + storage_energy_cost * BATTERY["duration"]
-    )
-
-    return total_battery_cost
-
-
-def build_network_with_battery(snapshots, load, profiles, costs):
-    n = create_network(snapshots)
-
-    for carrier in ["AC", "solar", "onwind", "offwind", "gas", BATTERY_NAME]:
-        n.add("Carrier", carrier)
-
-    n.add("Bus", ZONE, carrier="AC")
-
-    n.add(
-        "Load",
-        f"{ZONE}_load",
-        bus=ZONE,
-        p_set=load,
-    )
-
-    n.add(
-        "Generator",
-        "solar",
-        bus=ZONE,
-        carrier="solar",
-        p_nom_extendable=True,
-        p_max_pu=profiles["solar"],
-        capital_cost=annualized_fixed_cost(costs, "solar"),
-        marginal_cost=0,
-    )
-
-    n.add(
-        "Generator",
-        "onshore_wind",
-        bus=ZONE,
-        carrier="onwind",
-        p_nom_extendable=True,
-        p_max_pu=profiles["onshore_wind"],
-        capital_cost=annualized_fixed_cost(costs, "onwind"),
-        marginal_cost=0,
-    )
-
-    n.add(
-        "Generator",
-        "offshore_wind",
-        bus=ZONE,
-        carrier="offwind",
-        p_nom_extendable=True,
-        p_max_pu=profiles["offshore_wind"],
-        capital_cost=annualized_fixed_cost(costs, "offwind"),
-        marginal_cost=0,
-    )
-
-    n.add(
-        "Generator",
-        "ocgt",
-        bus=ZONE,
-        carrier="gas",
-        p_nom_extendable=True,
-        capital_cost=annualized_fixed_cost(costs, "OCGT"),
-        marginal_cost=ocgt_marginal_cost(costs),
-        efficiency=get_cost(costs, "OCGT", "efficiency"),
-    )
-
-    n.add(
-        "StorageUnit",
-        BATTERY_NAME,
-        bus=ZONE,
-        carrier=BATTERY_NAME,
-        p_nom_extendable=True,
-        max_hours=BATTERY["duration"],
-        efficiency_store=BATTERY["efficiency_store"],
-        efficiency_dispatch=BATTERY["efficiency_dispatch"],
-        capital_cost=get_battery_cost(costs),
-        marginal_cost=BATTERY["marginal_cost"],
-        cyclic_state_of_charge=True,
-    )
-
-    return n
-
-
-def plot_dispatch_with_battery(n, period, title, filename):
-    dispatch = n.generators_t.p[["solar", "onshore_wind", "offshore_wind", "ocgt"]].copy()
-    load = n.loads_t.p[f"{ZONE}_load"].copy()
-
-    battery_p = n.storage_units_t.p[BATTERY_NAME].copy()
     battery_discharge = battery_p.clip(lower=0)
     battery_charge = -battery_p.clip(upper=0)
 
     dispatch["battery_discharge"] = battery_discharge
-    effective_load = load + battery_charge
+    effective_load = load_ts + battery_charge
 
     ax = dispatch.loc[period].plot.area(figsize=(12, 5))
 
@@ -258,7 +109,7 @@ def plot_dispatch_with_battery(n, period, title, filename):
         label="load + battery charging",
     )
 
-    load.loc[period].plot(
+    load_ts.loc[period].plot(
         ax=ax,
         color="grey",
         linestyle="--",
@@ -270,13 +121,13 @@ def plot_dispatch_with_battery(n, period, title, filename):
     plt.ylabel("MW")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, filename), dpi=300, bbox_inches="tight")
+    plt.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
 
 
-def plot_battery_behavior(n, period, title, filename):
-    battery_p = n.storage_units_t.p[BATTERY_NAME].copy()
-    battery_soc = n.storage_units_t.state_of_charge[BATTERY_NAME].copy()
+def plot_battery_behavior(network, period, title, savepath):
+    battery_p = network.storage_units_t.p["battery"].copy()
+    battery_soc = network.storage_units_t.state_of_charge["battery"].copy()
 
     fig, ax1 = plt.subplots(figsize=(12, 4))
 
@@ -298,27 +149,50 @@ def plot_battery_behavior(n, period, title, filename):
 
     plt.title(title)
     plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, filename), dpi=300, bbox_inches="tight")
+    plt.savefig(savepath, dpi=300, bbox_inches="tight")
     plt.show()
 
 
 # ============================================================
-# Load fixed demand, weather data and costs
+# Load data
 # ============================================================
 
 snapshots = pd.date_range(
     f"{YEAR}-01-01 00:00",
     f"{YEAR}-12-31 23:00",
-    freq="h",
+    freq="h"
 )
 
-load_path = os.path.join(RAW_DIR, "load", f"load_{ZONE}_{YEAR}.csv")
+generation_path = os.path.join(
+    RAW_DIR,
+    "generation",
+    f"gen_{ZONE}_2020_2025.csv"
+)
+
+solar_generation_path = os.path.join(
+    RAW_DIR,
+    "generation",
+    f"solar_{ZONE}_2020_2025.csv"
+)
+
+load_path = os.path.join(
+    RAW_DIR,
+    "load",
+    f"load_{ZONE}_2020_2025.csv"
+)
+
 cost_path = os.path.join(DATA_DIR, "costs_PyPSA.csv")
-weather_path = os.path.join(DATA_DIR, "ProductionConsumptionSettlement_taskC.csv")
 
-load_data = load_load(load_path)
+generation_all = load_generation(generation_path)
+solar_generation_all = load_generation(solar_generation_path)
+load_all = load_load(load_path)
+costs = load_costs(cost_path, year=2030)
 
-demand_fixed = (
+generation = filter_year(generation_all, "time_utc", YEAR)
+solar_generation = filter_year(solar_generation_all, "time_utc", YEAR)
+load_data = filter_year(load_all, "time_utc", YEAR)
+
+load = (
     load_data
     .set_index("time_utc")["load_MW"]
     .reindex(snapshots)
@@ -327,206 +201,346 @@ demand_fixed = (
     .astype("float64")
 )
 
-costs = load_costs(cost_path, year=2030)
-df_weather = read_weather_data(weather_path)
 
-print("Weather data range:")
-print("Min timestamp:", df_weather.index.min())
-print("Max timestamp:", df_weather.index.max())
+# ============================================================
+# Renewable availability profiles
+# ============================================================
 
-print("\nRows per year:")
-print(df_weather.index.year.value_counts().sort_index())
+solar_cf = build_renewable_profile(
+    solar_generation,
+    PSR_MAP["solar"],
+    snapshots,
+    target_cf=0.11
+)
+
+onshore_cf = build_renewable_profile(
+    generation,
+    PSR_MAP["onshore_wind"],
+    snapshots,
+    target_cf=0.25
+)
+
+offshore_cf = build_renewable_profile(
+    generation,
+    PSR_MAP["offshore_wind"],
+    snapshots,
+    target_cf=0.52
+)
+
+print("\nRenewable profile means:")
+print("Solar CF mean:", solar_cf.mean())
+print("Onshore CF mean:", onshore_cf.mean())
+print("Offshore CF mean:", offshore_cf.mean())
 
 
 # ============================================================
-# Run Task C sensitivity with battery
+# Technology costs
 # ============================================================
 
-results = []
-plot_network = None
+solar_capital_cost = annualized_cost(costs, "solar")
+onshore_capital_cost = annualized_cost(costs, "onwind")
+offshore_capital_cost = annualized_cost(costs, "offwind")
+ocgt_capital_cost = annualized_cost(costs, "OCGT")
 
-for weather_year in WEATHER_YEARS:
-    print(f"\nRunning optimisation for weather year {weather_year}...")
+ocgt_efficiency = get_cost(costs, "OCGT", "efficiency")
+ocgt_mc = ocgt_marginal_cost(costs)
 
-    try:
-        profiles = prepare_weather_profiles(
-            df_weather=df_weather,
-            weather_year=weather_year,
-            snapshots=snapshots,
-        )
+BATTERY_DURATION = 4
+BATTERY_EFF_STORE = 0.95
+BATTERY_EFF_DISPATCH = 0.95
+BATTERY_MARGINAL_COST = 0
 
-        n = build_network_with_battery(
-            snapshots=snapshots,
-            load=demand_fixed,
-            profiles=profiles,
-            costs=costs,
-        )
+battery_inverter_investment = get_cost(costs, "battery inverter", "investment") * 1000  # €/MW
+battery_inverter_lifetime = get_cost(costs, "battery inverter", "lifetime")
+battery_inverter_fom = get_cost(costs, "battery inverter", "FOM") / 100 * battery_inverter_investment
 
-        n.optimize()
+battery_storage_investment = get_cost(costs, "battery storage", "investment") * 1000  # €/MWh
+battery_storage_lifetime = get_cost(costs, "battery storage", "lifetime")
 
-        generator_capacities = n.generators["p_nom_opt"].copy()
-        storage_capacities = n.storage_units["p_nom_opt"].copy()
+battery_inverter_cost = (
+    battery_inverter_investment * annuity(DISCOUNT_RATE, battery_inverter_lifetime)
+    + battery_inverter_fom
+)
 
-        capacities = pd.concat([generator_capacities, storage_capacities])
-        capacities.name = weather_year
+battery_storage_cost = (
+    battery_storage_investment * annuity(DISCOUNT_RATE, battery_storage_lifetime)
+)
 
-        results.append(capacities)
+battery_capital_cost = (
+    battery_inverter_cost
+    + battery_storage_cost
+)
 
-        if weather_year == PLOT_YEAR:
-            plot_network = n
+print("\nBattery cost components:")
+print("Battery inverter investment [€/MW]:", round(battery_inverter_investment, 2))
+print("Battery storage investment [€/MWh]:", round(battery_storage_investment, 2))
+print("Battery inverter annualized [€/MW/year]:", round(battery_inverter_cost, 2))
+print("Battery storage annualized [€/MWh/year]:", round(battery_storage_cost, 2))
+print("Battery total capital cost [€/MW/year]:", round(battery_capital_cost, 2))
 
-    except Exception as e:
-        print(f"Skipping {weather_year}: {e}")
-
-
-# ============================================================
-# Results tables
-# ============================================================
-
-results_df = pd.DataFrame(results)
-results_df.index.name = "weather_year"
-
-if results_df.empty:
-    raise RuntimeError("No optimisation results were created. Check input data and cost assumptions.")
-
-summary_df = pd.DataFrame({
-    "mean_capacity_MW": results_df.mean(),
-    "std_capacity_MW": results_df.std(),
-    "min_capacity_MW": results_df.min(),
-    "max_capacity_MW": results_df.max(),
-}).round(2)
-
-print("\nOptimal capacities by weather year [MW]:")
-print(results_df.round(2))
-
-print("\nAverage capacity and variability with battery [MW]:")
-print(summary_df)
-
-results_df.to_csv(os.path.join(DATA_DIR, "taskC_capacities_by_weather_year.csv"))
-summary_df.to_csv(os.path.join(DATA_DIR, "taskC_capacity_summary.csv"))
+print("\nCost check:")
+print("Solar capital cost [€/MW/year]:", round(solar_capital_cost, 2))
+print("Onshore capital cost [€/MW/year]:", round(onshore_capital_cost, 2))
+print("Offshore capital cost [€/MW/year]:", round(offshore_capital_cost, 2))
+print("OCGT capital cost [€/MW/year]:", round(ocgt_capital_cost, 2))
+print("OCGT marginal cost [€/MWh]:", round(ocgt_mc, 2))
+print("Battery capital cost [€/MW/year]:", round(battery_capital_cost, 2))
 
 
 # ============================================================
-# Battery-specific results for plot year
+# Build PyPSA network
 # ============================================================
 
-if plot_network is not None:
-    battery_power = plot_network.storage_units.at[BATTERY_NAME, "p_nom_opt"]
-    battery_energy = battery_power * plot_network.storage_units.at[BATTERY_NAME, "max_hours"]
+network = create_network(snapshots)
 
-    battery_p = plot_network.storage_units_t.p[BATTERY_NAME]
-    battery_soc = plot_network.storage_units_t.state_of_charge[BATTERY_NAME]
+network.add("Carrier", "AC")
+network.add("Bus", ZONE, carrier="AC")
 
-    annual_charge = -battery_p.clip(upper=0).sum()
-    annual_discharge = battery_p.clip(lower=0).sum()
-    equivalent_cycles = annual_discharge / battery_energy if battery_energy > 0 else 0
+network.add(
+    "Load",
+    f"{ZONE}_load",
+    bus=ZONE,
+    p_set=load,
+)
 
-    print(f"\nBattery results for {PLOT_YEAR}:")
-    print(f"Power capacity: {battery_power:.2f} MW")
-    print(f"Energy capacity: {battery_energy:.2f} MWh")
-    print(f"Annual charge: {annual_charge:.2f} MWh")
-    print(f"Annual discharge: {annual_discharge:.2f} MWh")
-    print(f"Equivalent full cycles: {equivalent_cycles:.2f}")
+network.add(
+    "Generator",
+    "solar",
+    bus=ZONE,
+    p_nom_extendable=True,
+    p_max_pu=solar_cf,
+    capital_cost=solar_capital_cost,
+    marginal_cost=0,
+)
 
-    battery_summary = pd.DataFrame({
-        "battery_power_MW": [battery_power],
-        "battery_energy_MWh": [battery_energy],
-        "annual_charge_MWh": [annual_charge],
-        "annual_discharge_MWh": [annual_discharge],
-        "equivalent_full_cycles": [equivalent_cycles],
+network.add(
+    "Generator",
+    "onshore_wind",
+    bus=ZONE,
+    p_nom_extendable=True,
+    p_max_pu=onshore_cf,
+    capital_cost=onshore_capital_cost,
+    marginal_cost=0,
+)
+
+network.add(
+    "Generator",
+    "offshore_wind",
+    bus=ZONE,
+    p_nom_extendable=True,
+    p_max_pu=offshore_cf,
+    capital_cost=offshore_capital_cost,
+    marginal_cost=0,
+)
+
+network.add(
+    "Generator",
+    "ocgt",
+    bus=ZONE,
+    p_nom_extendable=True,
+    capital_cost=ocgt_capital_cost,
+    marginal_cost=ocgt_mc,
+    efficiency=ocgt_efficiency,
+)
+
+network.add(
+    "StorageUnit",
+    "battery",
+    bus=ZONE,
+    p_nom_extendable=True,
+    max_hours=BATTERY_DURATION,
+    efficiency_store=BATTERY_EFF_STORE,
+    efficiency_dispatch=BATTERY_EFF_DISPATCH,
+    capital_cost=battery_capital_cost,
+    marginal_cost=BATTERY_MARGINAL_COST,
+    cyclic_state_of_charge=True,
+)
+
+
+# ============================================================
+# Optimise
+# ============================================================
+
+network.optimize()
+
+
+# ============================================================
+# Results
+# ============================================================
+
+capacities = network.generators[["p_nom_opt"]].rename(
+    columns={"p_nom_opt": "Optimal capacity [MW]"}
+)
+
+battery_power = network.storage_units.at["battery", "p_nom_opt"]
+battery_energy = battery_power * network.storage_units.at["battery", "max_hours"]
+
+battery_dispatch = network.storage_units_t.p["battery"]
+battery_soc = network.storage_units_t.state_of_charge["battery"]
+
+annual_charge = -battery_dispatch.clip(upper=0).sum()
+annual_discharge = battery_dispatch.clip(lower=0).sum()
+equivalent_cycles = annual_discharge / battery_energy if battery_energy > 0 else 0
+
+print("\nOptimal generator capacities:")
+print(capacities.round(2))
+
+print("\nBattery:")
+print(f"Power capacity [MW]: {battery_power:.2f}")
+print(f"Energy capacity [MWh]: {battery_energy:.2f}")
+print(f"Annual charge [MWh]: {annual_charge:.2f}")
+print(f"Annual discharge [MWh]: {annual_discharge:.2f}")
+print(f"Equivalent full cycles: {equivalent_cycles:.2f}")
+
+dispatch = network.generators_t.p[
+    ["solar", "onshore_wind", "offshore_wind", "ocgt"]
+]
+
+annual_generation = dispatch.sum().rename("Annual generation [MWh]")
+
+print("\nAnnual generation:")
+print(annual_generation.round(2))
+
+capacity_factors = (
+    dispatch.sum()
+    / (network.generators["p_nom_opt"] * len(network.snapshots))
+)
+
+print("\nCapacity factors:")
+print(capacity_factors.round(3))
+
+
+# ============================================================
+# Curtailment diagnostic
+# ============================================================
+
+renewable_available = (
+    network.generators_t.p_max_pu["solar"] * network.generators.at["solar", "p_nom_opt"]
+    + network.generators_t.p_max_pu["onshore_wind"] * network.generators.at["onshore_wind", "p_nom_opt"]
+    + network.generators_t.p_max_pu["offshore_wind"] * network.generators.at["offshore_wind", "p_nom_opt"]
+)
+
+renewable_dispatch = (
+    network.generators_t.p["solar"]
+    + network.generators_t.p["onshore_wind"]
+    + network.generators_t.p["offshore_wind"]
+)
+
+curtailment = renewable_available - renewable_dispatch
+
+print("\nCurtailment:")
+print("Annual curtailment [MWh]:", round(curtailment.sum(), 2))
+print("Max curtailment [MW]:", round(curtailment.max(), 2))
+
+
+# ============================================================
+# Save results
+# ============================================================
+
+taskC_results = pd.concat([
+    network.generators["p_nom_opt"],
+    pd.Series({
+        "battery_power": battery_power,
+        "battery_energy": battery_energy,
+        "annual_battery_charge": annual_charge,
+        "annual_battery_discharge": annual_discharge,
+        "equivalent_full_cycles": equivalent_cycles,
+        "annual_curtailment": curtailment.sum(),
+        "max_curtailment": curtailment.max(),
     })
+])
 
-    battery_summary.to_csv(
-        os.path.join(DATA_DIR, "taskC_battery_summary.csv"),
-        index=False,
-    )
+taskC_results.to_csv(os.path.join(DATA_DIR, "taskC_results.csv"))
 
 
 # ============================================================
 # Plots
 # ============================================================
 
-mean_caps = results_df.mean()
-std_caps = results_df.std()
+summer_week = slice(f"{YEAR}-07-07", f"{YEAR}-07-13 23:00")
+winter_week = slice(f"{YEAR}-01-13", f"{YEAR}-01-19 23:00")
+winter = slice(f"{YEAR}-01-01", f"{YEAR}-03-31 23:00")
+spring = slice(f"{YEAR}-04-01", f"{YEAR}-06-30 23:00")
+summer = slice(f"{YEAR}-07-01", f"{YEAR}-09-30 23:00")
+fall = slice(f"{YEAR}-10-01", f"{YEAR}-12-31 23:00")
+full_year = slice(f"{YEAR}-01-01", f"{YEAR}-12-31 23:00")
 
-plt.figure(figsize=(8, 5))
-mean_caps.plot(kind="bar", yerr=std_caps, capsize=4)
-plt.ylabel("MW")
-plt.title("Average optimal capacity and variability with battery")
-plt.xticks(rotation=45)
+plot_dispatch_with_battery(
+    network,
+    summer_week,
+    f"Dispatch in {ZONE} with battery - Summer week",
+    os.path.join(FIG_DIR, "taskC_dispatch_summer_battery.png"),
+)
+
+plot_dispatch_with_battery(
+    network,
+    winter_week,
+    f"Dispatch in {ZONE} with battery - Winter week",
+    os.path.join(FIG_DIR, "taskC_dispatch_winter_battery.png"),
+)
+
+plot_battery_behavior(
+    network,
+    summer_week,
+    "Battery behavior - Summer week",
+    os.path.join(FIG_DIR, "taskC_battery_behavior_summer_week.png"),
+)
+
+plot_battery_behavior(
+    network,
+    winter_week,
+    "Battery behavior - Winter week",
+    os.path.join(FIG_DIR, "taskC_battery_behavior_winter_week.png"),
+)
+
+plot_battery_behavior(
+    network,
+    winter,
+    "Battery behavior - Winter",
+    os.path.join(FIG_DIR, "taskC_battery_behavior_winter.png"),
+)
+
+plot_battery_behavior(
+    network,
+    spring,
+    "Battery behavior - Spring",
+    os.path.join(FIG_DIR, "taskC_battery_behavior_spring.png"),
+)
+
+plot_battery_behavior(
+    network,
+    summer,
+    "Battery behavior - Summer",
+    os.path.join(FIG_DIR, "taskC_battery_behavior_summer.png"),
+)
+
+plot_battery_behavior(
+    network,
+    fall,
+    "Battery behavior - Fall",
+    os.path.join(FIG_DIR, "taskC_battery_behavior_fall.png"),
+)
+
+plt.figure(figsize=(12, 4))
+battery_soc.plot()
+plt.title("Battery state of charge over full year")
+plt.ylabel("MWh")
 plt.tight_layout()
 plt.savefig(
-    os.path.join(FIG_DIR, "taskC_capacity_mean_variability.png"),
+    os.path.join(FIG_DIR, "taskC_battery_soc_full_year.png"),
     dpi=300,
     bbox_inches="tight",
 )
 plt.show()
 
-
-results_df.plot(marker="o", figsize=(10, 5))
-plt.ylabel("MW")
-plt.title("Optimal capacities by weather year with battery")
-plt.xticks(rotation=0)
+plt.figure(figsize=(12, 4))
+battery_soc.rolling(24 * 7).mean().plot()
+plt.title("Smoothed battery state of charge - weekly average")
+plt.ylabel("MWh")
 plt.tight_layout()
 plt.savefig(
-    os.path.join(FIG_DIR, "taskC_capacities_by_weather_year.png"),
+    os.path.join(FIG_DIR, "taskC_battery_soc_weekly_average.png"),
     dpi=300,
     bbox_inches="tight",
 )
 plt.show()
-
-
-if plot_network is not None:
-    summer_week = slice(f"{YEAR}-07-07", f"{YEAR}-07-13 23:00")
-    winter_week = slice(f"{YEAR}-01-13", f"{YEAR}-01-19 23:00")
-    full_year = slice(f"{YEAR}-01-01", f"{YEAR}-12-31 23:00")
-
-    plot_dispatch_with_battery(
-        plot_network,
-        summer_week,
-        f"Dispatch in {ZONE} with battery - Summer week ({PLOT_YEAR})",
-        "taskC_dispatch_summer_battery.png",
-    )
-
-    plot_dispatch_with_battery(
-        plot_network,
-        winter_week,
-        f"Dispatch in {ZONE} with battery - Winter week ({PLOT_YEAR})",
-        "taskC_dispatch_winter_battery.png",
-    )
-
-    plot_battery_behavior(
-        plot_network,
-        summer_week,
-        f"Battery behavior - Summer week ({PLOT_YEAR})",
-        "taskC_battery_behavior_summer.png",
-    )
-
-    plot_battery_behavior(
-        plot_network,
-        winter_week,
-        f"Battery behavior - Winter week ({PLOT_YEAR})",
-        "taskC_battery_behavior_winter.png",
-    )
-
-    plot_battery_behavior(
-        plot_network,
-        full_year,
-        f"Battery behavior - Full year ({PLOT_YEAR})",
-        "taskC_battery_behavior_full_year.png",
-    )
-
-    battery_soc = plot_network.storage_units_t.state_of_charge[BATTERY_NAME]
-    soc_smooth = battery_soc.rolling(24 * 7).mean()
-
-    plt.figure(figsize=(12, 4))
-    soc_smooth.plot()
-    plt.title(f"Smoothed battery state of charge - weekly average ({PLOT_YEAR})")
-    plt.ylabel("MWh")
-    plt.tight_layout()
-    plt.savefig(
-        os.path.join(FIG_DIR, "taskC_battery_soc_weekly_average.png"),
-        dpi=300,
-        bbox_inches="tight",
-    )
-    plt.show()

@@ -15,9 +15,16 @@ from taskD import (
     DATA_DIR,
     FIG_DIR,
     ZONES,
-    build_network,
-    hydro_energy_constraint_no2,
     pivot_load,
+)
+
+from taskG import hydro_energy_constraint_no2
+
+from taskH import (
+    build_task_g_model,
+    calculate_emissions,
+    CO2_LIMIT_SHARE,
+    co2_limit_constraint,
 )
 
 
@@ -27,7 +34,7 @@ from taskD import (
 
 GRIB_FILE = os.path.join(DATA_DIR, "weather_data_2025")
 
-T_BASE = 15.0  # Base temperature for heating degree hours [°C]
+T_BASE = 15.0
 
 HEAT_DEMAND_SHARE = {
     "DK1": 0.25,
@@ -37,7 +44,7 @@ HEAT_DEMAND_SHARE = {
 }
 
 HEAT_PUMP_COP = 3.0
-HEAT_PUMP_CAPITAL_COST = 80_000  # €/MW_th/year, simplified assumption
+HEAT_PUMP_CAPITAL_COST = 80_000
 
 
 # ============================================================
@@ -60,28 +67,52 @@ def load_temperature_profile(path):
     return temperature_country
 
 
-def build_heat_profile(temperature_c):
+def build_heat_profile(temperature_c, snapshots):
     heating_degree_hours = (T_BASE - temperature_c).clip(lower=0.0)
+
+    heating_degree_hours = (
+        heating_degree_hours
+        .reindex(snapshots)
+        .interpolate()
+        .ffill()
+        .bfill()
+    )
 
     if heating_degree_hours.sum() <= 0:
         raise ValueError("Heating degree hours are zero. Check temperature data.")
 
     heat_profile = heating_degree_hours / heating_degree_hours.sum()
 
-    if not np.isclose(heat_profile.sum(), 1.0):
-        raise ValueError("Heat profile does not sum to 1.")
-
-    return heat_profile
+    return heat_profile.astype("float64")
 
 
 def build_zone_heat_demand(zone, heat_profile, snapshots):
     electricity_load = pivot_load(zone)
-    annual_electricity_demand = electricity_load.sum()
 
+    # Fix duplicate timestamps before reindexing
+    electricity_load = (
+        electricity_load
+        .groupby(electricity_load.index)
+        .first()
+        .reindex(snapshots)
+        .ffill()
+        .fillna(0.0)
+    )
+
+    annual_electricity_demand = electricity_load.sum()
     annual_heat_demand = HEAT_DEMAND_SHARE[zone] * annual_electricity_demand
 
     heat_demand = heat_profile * annual_heat_demand
-    heat_demand = heat_demand.reindex(snapshots).fillna(0.0)
+    heat_demand = (
+        heat_demand
+        .groupby(heat_demand.index)
+        .first()
+        .reindex(snapshots)
+        .interpolate()
+        .ffill()
+        .bfill()
+        .fillna(0.0)
+    )
 
     return heat_demand.astype("float64")
 
@@ -135,6 +166,25 @@ def add_heat_sector(network, heat_profile):
 
 
 # ============================================================
+# Optimisation with both hydro and CO2 constraint
+# ============================================================
+
+def combined_extra_functionality(network, snapshots):
+    hydro_energy_constraint_no2(network, snapshots)
+    co2_limit_constraint(network, snapshots)
+
+
+def optimise_task_i_network(network, co2_limit):
+    network.co2_limit = co2_limit
+
+    network.optimize(
+        extra_functionality=combined_extra_functionality,
+    )
+
+    return network
+
+
+# ============================================================
 # Results
 # ============================================================
 
@@ -160,6 +210,14 @@ def print_heat_results(network):
     print(heat_summary.round(2))
 
     heat_summary.to_csv(os.path.join(DATA_DIR, "taskI_heat_summary.csv"))
+
+
+def print_capacity_results(network):
+    print("\n--- Optimised generator capacities [MW] ---")
+    print(network.generators[["bus", "carrier", "p_nom_opt"]].round(2))
+
+    print("\n--- Optimised link capacities [MW] ---")
+    print(network.links[["bus0", "bus1", "carrier", "p_nom_opt"]].round(2))
 
 
 # ============================================================
@@ -255,33 +313,69 @@ def plot_heat_pump_capacities(network):
 # Run Task I
 # ============================================================
 
-costs = load_costs(os.path.join(DATA_DIR, "costs_PyPSA.csv"), year=COST_YEAR)
+if __name__ == "__main__":
 
-temperature = load_temperature_profile(GRIB_FILE)
-heat_profile = build_heat_profile(temperature)
+    costs = load_costs(os.path.join(DATA_DIR, "costs_PyPSA.csv"), year=COST_YEAR)
 
-network = build_network(costs)
-network = add_heat_sector(network, heat_profile)
+    # --------------------------------------------------------
+    # Build baseline Task G model to calculate Task H CO2 limit
+    # --------------------------------------------------------
 
-print("\n--- Task I network overview ---")
-print("Buses:", len(network.buses))
-print("Loads:", len(network.loads))
-print("Generators:", len(network.generators))
-print("Links:", len(network.links))
-print("Lines:", len(network.lines))
-print("Storage units:", len(network.storage_units))
+    baseline = build_task_g_model(costs)
+    baseline.optimize(extra_functionality=hydro_energy_constraint_no2)
 
-network.optimize(
-    extra_functionality=hydro_energy_constraint_no2,
-)
+    baseline_emissions = calculate_emissions(baseline)
+    co2_limit = CO2_LIMIT_SHARE * baseline_emissions["total"]
 
-print_heat_results(network)
+    print("\n--- Task I CO2 limit from Task H ---")
+    print(f"Baseline emissions: {baseline_emissions['total']:,.0f} tCO2")
+    print(f"CO2 limit: {co2_limit:,.0f} tCO2")
+    print(f"CO2 limit share: {CO2_LIMIT_SHARE:.0%}")
 
-winter_week = slice(f"{YEAR}-01-13", f"{YEAR}-01-19 23:00")
+    # --------------------------------------------------------
+    # Build Task I model: Task G/H system + heat sector
+    # --------------------------------------------------------
 
-plot_heat_pump_capacities(network)
+    network = build_task_g_model(costs)
 
-for zone in ZONES:
-    plot_heat_dispatch(network, zone, winter_week)
-    plot_heat_pump_electricity_use(network, zone, winter_week)
-    plot_electricity_load_with_heating(network, zone, winter_week)
+    temperature = load_temperature_profile(GRIB_FILE)
+    heat_profile = build_heat_profile(temperature, network.snapshots)
+
+    network = add_heat_sector(network, heat_profile)
+
+    print("\n--- Task I network overview before optimisation ---")
+    print("Buses:", len(network.buses))
+    print("Loads:", len(network.loads))
+    print("Generators:", len(network.generators))
+    print("Links:", len(network.links))
+    print("Lines:", len(network.lines))
+    print("Storage units:", len(network.storage_units))
+
+    network = optimise_task_i_network(network, co2_limit)
+
+    # --------------------------------------------------------
+    # Results
+    # --------------------------------------------------------
+
+    task_i_emissions = calculate_emissions(network)
+
+    print("\n--- Task I emissions ---")
+    print(f"Gas emissions:   {task_i_emissions['gas']:,.0f} tCO2")
+    print(f"Coal emissions:  {task_i_emissions['coal']:,.0f} tCO2")
+    print(f"Total emissions: {task_i_emissions['total']:,.0f} tCO2")
+
+    print_heat_results(network)
+    print_capacity_results(network)
+
+    # --------------------------------------------------------
+    # Plots
+    # --------------------------------------------------------
+
+    winter_week = slice(f"{YEAR}-01-13", f"{YEAR}-01-19 23:00")
+
+    plot_heat_pump_capacities(network)
+
+    for zone in ZONES:
+        plot_heat_dispatch(network, zone, winter_week)
+        plot_heat_pump_electricity_use(network, zone, winter_week)
+        plot_electricity_load_with_heating(network, zone, winter_week)
