@@ -294,7 +294,7 @@ def print_task_j_results(network):
 # ============================================================
 # Plots
 # ============================================================
-def plot_generation_mix(network):
+'''def plot_generation_mix(network):
     gen_mix = (
         network.generators_t.p
         .sum()
@@ -314,10 +314,34 @@ def plot_generation_mix(network):
         dpi=300,
         bbox_inches="tight",
     )
-    plt.show()
+    plt.show()'''
+
+def plot_generation_mix(network):
+    gen_mix = (
+        network.generators_t.p
+        .sum()
+        .groupby(network.generators.carrier)
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    gen_mix.plot(kind="bar", ax=ax)
+
+    ax.set_ylabel("Annual generation [MWh]")
+    ax.set_title("Annual generation mix with Bornholm energy island")
+    ax.tick_params(axis="x", rotation=45)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(FIG_DIR, "taskJ_generation_mix.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
 
 
-def plot_installed_capacity_by_carrier(network):
+'''def plot_installed_capacity_by_carrier(network):
     capacities = (
         network.generators
         .groupby("carrier")["p_nom_opt"]
@@ -336,10 +360,34 @@ def plot_installed_capacity_by_carrier(network):
         dpi=300,
         bbox_inches="tight",
     )
-    plt.show()
+    plt.show()'''
 
 
-def plot_installed_capacity_by_country(network):
+def plot_installed_capacity_by_carrier(network):
+    capacities = (
+        network.generators
+        .groupby("carrier")["p_nom_opt"]
+        .sum()
+        .sort_values(ascending=False)
+    )
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    capacities.plot(kind="bar", ax=ax)
+
+    ax.set_ylabel("Installed capacity [MW]")
+    ax.set_title("Installed generation capacity with Bornholm energy island")
+    ax.tick_params(axis="x", rotation=45)
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(FIG_DIR, "taskJ_capacity_by_carrier.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+'''def plot_installed_capacity_by_country(network):
     gen_capacity = network.generators.copy()
     gen_capacity["capacity_MW"] = gen_capacity["p_nom_opt"].clip(lower=0)
     gen_capacity["country"] = gen_capacity["bus"].str.replace("bus_", "", regex=False)
@@ -362,10 +410,87 @@ def plot_installed_capacity_by_country(network):
         dpi=300,
         bbox_inches="tight",
     )
-    plt.show()
+    plt.show()'''
 
 
-def plot_bornholm_export_duration(network):
+TECH_COLORS = {
+    "onwind":  "#1f77b4",  # blue
+    "offwind": "#ff7f0e",  # orange
+    "solar":   "#2ca02c",  # green
+    "hydro":   "#9467bd",  # purple
+    "gas":     "#d62728",  # red
+    "coal":    "#8c564b",  # brown
+    "battery": "#17becf",  # cyan
+}
+
+def plot_installed_capacity_by_country(network):
+    gen_capacity = network.generators.copy()
+    gen_capacity["capacity_MW"] = gen_capacity["p_nom_opt"].clip(lower=0)
+    gen_capacity["country"] = gen_capacity["bus"].str.replace("bus_", "", regex=False)
+
+    # Absolute capacity table [MW]
+    capacity_table = (
+        gen_capacity
+        .groupby(["country", "carrier"])["capacity_MW"]
+        .sum()
+        .unstack(fill_value=0)
+    )
+
+    # Total capacity per country (for labels)
+    total_capacity_MW = capacity_table.sum(axis=1)
+
+    # Convert to percentages
+    capacity_share = capacity_table.div(total_capacity_MW, axis=0) * 100
+
+    # Order technologies consistently
+    tech_order = [t for t in TECH_COLORS if t in capacity_share.columns]
+    capacity_share = capacity_share[tech_order]
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    capacity_share.plot(
+        kind="bar",
+        stacked=True,
+        ax=ax,
+        color=[TECH_COLORS[t] for t in tech_order],
+        width=0.6,
+    )
+
+    # Axis formatting
+    ax.set_ylabel("Share of installed capacity [%]")
+    ax.set_xlabel("Zone")
+    ax.set_ylim(0, 105)
+    ax.set_title("Installed generation capacity by zone")
+
+    # Legend
+    ax.legend(
+        title="Technology",
+        bbox_to_anchor=(1.05, 1),
+        loc="upper left",
+    )
+
+    # Add total capacity labels on top (in GW)
+    for i, (zone, total_MW) in enumerate(total_capacity_MW.items()):
+        ax.text(
+            i,
+            102,
+            f"{total_MW / 1000:.1f} GW",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+        )
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(FIG_DIR, "taskJ_capacity_by_country.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+'''def plot_bornholm_export_duration(network):
     flows = network.lines_t.p0[["Bornholm_DK2", "Bornholm_DE"]].copy()
     total_export = flows.sum(axis=1)
 
@@ -380,10 +505,30 @@ def plot_bornholm_export_duration(network):
         dpi=300,
         bbox_inches="tight",
     )
-    plt.show()
+    plt.show()'''
 
 
-def plot_prices(network):
+def plot_bornholm_export_duration(network):
+    flows = network.lines_t.p0[["Bornholm_DK2", "Bornholm_DE"]].copy()
+    total_export = flows.sum(axis=1)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    total_export.sort_values(ascending=False).reset_index(drop=True).plot(ax=ax)
+
+    ax.set_ylabel("Bornholm net export [MW]")
+    ax.set_xlabel("Hour rank")
+    ax.set_title("Bornholm export duration curve")
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(FIG_DIR, "taskJ_bornholm_export_duration_curve.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+
+'''def plot_prices(network):
     price_buses = ["bus_DK1", "bus_DK2", "bus_DE", "bus_NO2", "bus_Bornholm"]
     prices = network.buses_t.marginal_price[price_buses]
 
@@ -397,7 +542,26 @@ def plot_prices(network):
         dpi=300,
         bbox_inches="tight",
     )
-    plt.show()
+    plt.show()'''
+
+
+def plot_prices(network):
+    price_buses = ["bus_DK1", "bus_DK2", "bus_DE", "bus_NO2", "bus_Bornholm"]
+    prices = network.buses_t.marginal_price[price_buses]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    prices.plot(ax=ax)
+
+    ax.set_ylabel("Price [EUR/MWh]")
+    ax.set_title("Electricity prices with Bornholm energy island")
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(FIG_DIR, "taskJ_prices.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
 
 # ============================================================
 # Run Task J
@@ -442,7 +606,7 @@ plot_installed_capacity_by_country(network)
 plot_bornholm_export_duration(network)
 plot_prices(network)
 
-plot_heat_pump_capacities(network)
+#plot_heat_pump_capacities(network)
 
-for zone in ZONES:
-    plot_electricity_load_with_heating(network, zone, winter_week)
+#for zone in ZONES:
+#    plot_electricity_load_with_heating(network, zone, winter_week)

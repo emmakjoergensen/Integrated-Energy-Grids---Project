@@ -86,7 +86,7 @@ def build_renewable_profile(generation, psr_codes, snapshots, target_cf):
     return make_profile(series, target_cf)
 
 
-def plot_dispatch_with_battery(network, period, title, savepath):
+'''def plot_dispatch_with_battery(network, period, title, savepath):
     dispatch = network.generators_t.p[
         ["solar", "onshore_wind", "offshore_wind", "ocgt"]
     ].copy()
@@ -122,10 +122,50 @@ def plot_dispatch_with_battery(network, period, title, savepath):
     plt.legend()
     plt.tight_layout()
     plt.savefig(savepath, dpi=300, bbox_inches="tight")
-    plt.show()
+    plt.show()'''
 
+def plot_dispatch_with_battery(network, period, title, savepath):
+    dispatch = network.generators_t.p[
+        ["solar", "onshore_wind", "offshore_wind", "ocgt"]
+    ].copy()
 
-def plot_battery_behavior(network, period, title, savepath):
+    load_ts = network.loads_t.p[f"{ZONE}_load"].copy()
+    battery_p = network.storage_units_t.p["battery"].copy()
+
+    battery_discharge = battery_p.clip(lower=0)
+    battery_charge = -battery_p.clip(upper=0)
+
+    dispatch["battery_discharge"] = battery_discharge
+    effective_load = load_ts + battery_charge
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+
+    dispatch.loc[period].plot.area(ax=ax)
+
+    effective_load.loc[period].plot(
+        ax=ax,
+        color="black",
+        linewidth=2,
+        label="load + battery charging",
+    )
+
+    load_ts.loc[period].plot(
+        ax=ax,
+        color="grey",
+        linestyle="--",
+        linewidth=1.5,
+        label="load",
+    )
+
+    ax.set_title(title)
+    ax.set_ylabel("MW")
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(savepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+'''def plot_battery_behavior(network, period, title, savepath):
     battery_p = network.storage_units_t.p["battery"].copy()
     battery_soc = network.storage_units_t.state_of_charge["battery"].copy()
 
@@ -150,7 +190,34 @@ def plot_battery_behavior(network, period, title, savepath):
     plt.title(title)
     plt.tight_layout()
     plt.savefig(savepath, dpi=300, bbox_inches="tight")
-    plt.show()
+    plt.show()'''
+
+def plot_battery_behavior(network, period, title, savepath):
+    battery_p = network.storage_units_t.p["battery"].copy()
+    battery_soc = network.storage_units_t.state_of_charge["battery"].copy()
+
+    fig, ax1 = plt.subplots(figsize=(12, 4))
+
+    battery_p.loc[period].plot(ax=ax1, label="battery dispatch [MW]")
+    ax1.axhline(0, linewidth=1)
+    ax1.set_ylabel("MW")
+
+    ax2 = ax1.twinx()
+    battery_soc.loc[period].plot(
+        ax=ax2,
+        linestyle="--",
+        label="state of charge [MWh]",
+    )
+    ax2.set_ylabel("MWh")
+
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(savepath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 # ============================================================
@@ -521,7 +588,7 @@ plot_battery_behavior(
     os.path.join(FIG_DIR, "taskC_battery_behavior_fall.png"),
 )
 
-plt.figure(figsize=(12, 4))
+'''plt.figure(figsize=(12, 4))
 battery_soc.plot()
 plt.title("Battery state of charge over full year")
 plt.ylabel("MWh")
@@ -531,9 +598,22 @@ plt.savefig(
     dpi=300,
     bbox_inches="tight",
 )
-plt.show()
+plt.show()'''
 
-plt.figure(figsize=(12, 4))
+fig, ax = plt.subplots(figsize=(12, 4))
+battery_soc.plot(ax=ax)
+ax.set_title("Battery state of charge over full year")
+ax.set_ylabel("MWh")
+
+fig.tight_layout()
+fig.savefig(
+    os.path.join(FIG_DIR, "taskC_battery_soc_full_year.png"),
+    dpi=300,
+    bbox_inches="tight",
+)
+plt.close(fig)
+
+'''plt.figure(figsize=(12, 4))
 battery_soc.rolling(24 * 7).mean().plot()
 plt.title("Smoothed battery state of charge - weekly average")
 plt.ylabel("MWh")
@@ -543,4 +623,17 @@ plt.savefig(
     dpi=300,
     bbox_inches="tight",
 )
-plt.show()
+plt.show()'''
+
+fig, ax = plt.subplots(figsize=(12, 4))
+battery_soc.rolling(24 * 7).mean().plot(ax=ax)
+ax.set_title("Smoothed battery state of charge - weekly average")
+ax.set_ylabel("MWh")
+
+fig.tight_layout()
+fig.savefig(
+    os.path.join(FIG_DIR, "taskC_battery_soc_weekly_average.png"),
+    dpi=300,
+    bbox_inches="tight",
+)
+plt.close(fig)
