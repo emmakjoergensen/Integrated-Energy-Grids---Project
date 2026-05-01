@@ -9,6 +9,23 @@ from src.cost_loader import load_costs, get_cost
 from src.profiles import make_profile
 from src.network_builder import create_network
 
+
+# ============================================================
+# Plot style (global)
+# ============================================================
+
+PLOT_FONT_SIZE = 24  # <-- change ONLY this number
+
+plt.rcParams.update({
+    "font.size": PLOT_FONT_SIZE,           # base font size
+    "axes.titlesize": PLOT_FONT_SIZE + 2,  # title
+    "axes.labelsize": PLOT_FONT_SIZE,      # x/y labels
+    "xtick.labelsize": PLOT_FONT_SIZE - 1,
+    "ytick.labelsize": PLOT_FONT_SIZE - 1,
+    "legend.fontsize": PLOT_FONT_SIZE - 1,
+    "figure.titlesize": PLOT_FONT_SIZE + 2,
+})
+
 pd.options.future.infer_string = False
 
 # ============================================================

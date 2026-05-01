@@ -325,7 +325,7 @@ def plot_generation_mix(network):
         .sort_values(ascending=False)
     )
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 2.5))
     gen_mix.plot(kind="bar", ax=ax)
 
     ax.set_ylabel("Annual generation [MWh]")
@@ -512,7 +512,7 @@ def plot_bornholm_export_duration(network):
     flows = network.lines_t.p0[["Bornholm_DK2", "Bornholm_DE"]].copy()
     total_export = flows.sum(axis=1)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(8, 2.5))
     total_export.sort_values(ascending=False).reset_index(drop=True).plot(ax=ax)
 
     ax.set_ylabel("Bornholm net export [MW]")
