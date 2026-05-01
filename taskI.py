@@ -51,20 +51,27 @@ HEAT_PUMP_CAPITAL_COST = 80_000
 # Heat demand profile
 # ============================================================
 
-def load_temperature_profile(path):
+def load_temperature_profiles(path):
     ds = xr.open_dataset(path, engine="cfgrib")
 
     temperature_c = ds["t2m"] - 273.15
-    temperature_country = temperature_c.mean(dim=["latitude", "longitude"]).to_pandas()
+    base_temp = temperature_c.mean(dim=["latitude", "longitude"]).to_pandas()
 
-    if temperature_country.index.tz is not None:
-        temperature_country.index = (
-            temperature_country.index
+    if base_temp.index.tz is not None:
+        base_temp.index = (
+            base_temp.index
             .tz_convert("UTC")
             .tz_localize(None)
         )
 
-    return temperature_country
+    # Create regional profiles
+    temperature_profiles = {
+        "DK": base_temp,
+        "DE": base_temp + 2.0,
+        "NO2": base_temp - 2.0,
+    }
+
+    return temperature_profiles
 
 
 def build_heat_profile(temperature_c, snapshots):
@@ -121,7 +128,7 @@ def build_zone_heat_demand(zone, heat_profile, snapshots):
 # Add heat sector
 # ============================================================
 
-def add_heat_sector(network, heat_profile):
+def add_heat_sector(network, temperature_profiles):
     if "heat" not in network.carriers.index:
         network.add("Carrier", "heat")
 
@@ -131,17 +138,27 @@ def add_heat_sector(network, heat_profile):
     for zone in ZONES:
         heat_bus = f"heat_{zone}"
 
+        if zone in ["DK1", "DK2"]:
+            temperature = temperature_profiles["DK"]
+        elif zone == "DE":
+            temperature = temperature_profiles["DE"]
+        elif zone == "NO2":
+            temperature = temperature_profiles["NO2"]
+        else:
+            raise ValueError(f"No temperature profile defined for zone: {zone}")
+
+        heat_profile = build_heat_profile(
+            temperature_c=temperature,
+            snapshots=network.snapshots,
+        )
+
         heat_demand = build_zone_heat_demand(
             zone=zone,
             heat_profile=heat_profile,
             snapshots=network.snapshots,
         )
 
-        network.add(
-            "Bus",
-            heat_bus,
-            carrier="heat",
-        )
+        network.add("Bus", heat_bus, carrier="heat")
 
         network.add(
             "Load",
@@ -308,6 +325,80 @@ def plot_heat_pump_capacities(network):
     )
     plt.show()
 
+'''import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+jan = slice(f"{YEAR}-01-01", f"{YEAR}-01-30 23:00")
+apr = slice(f"{YEAR}-04-01", f"{YEAR}-04-30 23:00")
+jul = slice(f"{YEAR}-07-01", f"{YEAR}-07-30 23:00")
+octo = slice(f"{YEAR}-10-01", f"{YEAR}-10-30 23:00")
+
+# Font sizes
+plt.rcParams.update({
+    "font.size": 22,
+    "axes.titlesize": 26,
+    "axes.labelsize": 22,
+    "legend.fontsize": 22,
+    "xtick.labelsize": 22,
+    "ytick.labelsize": 22,
+})
+
+fig, axes = plt.subplots(2, 2, figsize=(20, 12), sharex=True)
+axes = axes.flatten()
+
+for i, zone in enumerate(ZONES):
+    ax = axes[i]
+
+    base = network.loads_t.p_set[f"load_{zone}"].loc[jan]/1000
+    hp_jan = network.links_t.p0[f"heat_pump_{zone}"].loc[jan]/1000
+
+    hp_apr = network.links_t.p0[f"heat_pump_{zone}"].loc[apr].copy()/1000
+    hp_jul = network.links_t.p0[f"heat_pump_{zone}"].loc[jul].copy()/1000
+    hp_oct = network.links_t.p0[f"heat_pump_{zone}"].loc[octo].copy()/1000
+
+    hp_apr.index = base.index
+    hp_jul.index = base.index
+    hp_oct.index = base.index
+
+    # Lines
+    ax.plot(base, color="black", linewidth=3, label="Total electricity load (January)")
+    ax.plot(base + hp_jan, linestyle="--", color="black", linewidth=3,
+            label="Total electricity + heat load (January)")
+
+    ax.plot(hp_jan, color="red", linewidth=3, label="Heat load January")
+    ax.plot(hp_apr, color="blue", linewidth=3, label="Heat load April")
+    ax.plot(hp_jul, color="green", linewidth=3, label="Heat load July")
+    ax.plot(hp_oct, color="gold", linewidth=3, label="Heat load October")
+
+    ax.set_title(zone)
+    ax.set_ylabel("GW")
+    ax.set_ylim(bottom=0)
+
+    ax.xaxis.set_major_locator(mdates.DayLocator(interval=5))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d"))
+
+    if i >= 2:
+        ax.set_xlabel("Day")
+
+# Legend
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(
+    handles,
+    labels,
+    loc="upper center",
+    ncol=3,
+    bbox_to_anchor=(0.5, 0.96),
+    frameon=False
+)
+
+fig.suptitle(
+    "Electricity demand and heat pump load – Seasonal comparison (2025)",
+    fontsize=26,
+)
+
+plt.tight_layout(rect=[0, 0, 1, 0.90])
+plt.show()'''
+
 
 # ============================================================
 # Run Task I
@@ -338,10 +429,9 @@ if __name__ == "__main__":
 
     network = build_task_g_model(costs)
 
-    temperature = load_temperature_profile(GRIB_FILE)
-    heat_profile = build_heat_profile(temperature, network.snapshots)
+    temperature_profiles = load_temperature_profiles(GRIB_FILE)
 
-    network = add_heat_sector(network, heat_profile)
+    network = add_heat_sector(network, temperature_profiles)
 
     print("\n--- Task I network overview before optimisation ---")
     print("Buses:", len(network.buses))
