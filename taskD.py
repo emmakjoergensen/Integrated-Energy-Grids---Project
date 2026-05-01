@@ -26,6 +26,26 @@ os.makedirs(FIG_DIR, exist_ok=True)
 
 ZONES = ["DK1", "DK2", "NO2", "DE"]
 
+TECH_ORDER = [
+    "onwind",
+    "offwind",
+    "solar",
+    "hydro",
+    "gas",
+    "coal",
+    "battery",
+]
+
+TECH_COLORS = {
+    "onwind":  "#1f77b4",  # blue
+    "offwind": "#ff7f0e",  # orange
+    "solar":   "#2ca02c",  # green
+    "hydro":   "#9467bd",  # purple
+    "gas":     "#d62728",  # red
+    "coal":    "#8c564b",  # brown
+    "battery": "#17becf",  # teal
+}
+
 PSR_MAP = {
     "wind_on": ["B19"],
     "wind_off": ["B18"],
@@ -387,45 +407,70 @@ def build_network(costs):
 # Results and plotting
 # ============================================================
 
-def installed_capacity_table(network, include_storage=True):
-    gen_capacity = network.generators.copy()
-    gen_capacity["capacity_MW"] = gen_capacity["p_nom_opt"].clip(lower=0)
-    gen_capacity["country"] = gen_capacity["bus"].str.replace("bus_", "", regex=False)
+def plot_installed_capacity_percent(network):
+    # --- Installed generator capacities ---
+    gen = network.generators.copy()
+    gen["capacity_GW"] = gen["p_nom_opt"].clip(lower=0) / 1e3
+    gen["zone"] = gen["bus"].str.replace("bus_", "", regex=False)
 
-    frames = [gen_capacity[["country", "carrier", "capacity_MW"]]]
-
-    if include_storage:
-        storage_capacity = network.storage_units.copy()
-        storage_capacity["capacity_MW"] = storage_capacity["p_nom_opt"].clip(lower=0)
-        storage_capacity["country"] = storage_capacity["bus"].str.replace("bus_", "", regex=False)
-        storage_capacity["carrier"] = "battery"
-        frames.append(storage_capacity[["country", "carrier", "capacity_MW"]])
-
-    combined = pd.concat(frames)
-
-    return (
-        combined
-        .groupby(["country", "carrier"])["capacity_MW"]
+    gen_cap = (
+        gen
+        .groupby(["zone", "carrier"])["capacity_GW"]
         .sum()
-        .unstack(fill_value=0)
+        .unstack(fill_value=0.0)
     )
 
+    # --- Battery power capacity ---
+    storage = network.storage_units.copy()
+    storage["capacity_GW"] = storage["p_nom_opt"].clip(lower=0) / 1e3
+    storage["zone"] = storage["bus"].str.replace("bus_", "", regex=False)
+    storage["carrier"] = "battery"
 
-def plot_installed_capacity(network):
-    table = installed_capacity_table(network)
+    storage_cap = (
+        storage
+        .groupby(["zone", "carrier"])["capacity_GW"]
+        .sum()
+        .unstack(fill_value=0.0)
+    )
 
-    print("\n--- Installed capacity by country and technology [MW] ---")
-    print(table.round(2))
+    # --- Combine ---
+    cap = gen_cap.add(storage_cap, fill_value=0.0)
 
-    table.plot(kind="bar", stacked=True, figsize=(10, 6))
+    # --- Convert to percentages ---
+    cap_pct = cap.div(cap.sum(axis=1), axis=0) * 100
 
-    plt.ylabel("Installed capacity [MW]")
-    plt.xlabel("Country")
-    plt.title("Installed generation and battery capacities by country")
-    plt.legend(title="Technology", bbox_to_anchor=(1.05, 1), loc="upper left")
-    plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, "taskD_installed_capacity_by_country.png"), dpi=300)
-    plt.show()
+    # --- Enforce common order and colours ---
+    cap_pct = cap_pct.reindex(columns=TECH_ORDER, fill_value=0.0)
+    colors = [TECH_COLORS[c] for c in cap_pct.columns]
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(10, 6))
+    cap_pct.plot(kind="bar", stacked=True, ax=ax, color=colors)
+
+    # --- Absolute capacity labels ---
+    for i, zone in enumerate(cap.index):
+        ax.text(
+            i,
+            102,
+            f"{cap.loc[zone].sum():.1f} GW",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax.set_ylabel("Share of installed capacity [%]")
+    ax.set_xlabel("Zone")
+    ax.set_ylim(0, 110)
+    ax.set_title("Installed generation capacity by zone")
+    ax.legend(title="Technology", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+    fig.tight_layout()
+    fig.savefig(
+        os.path.join(FIG_DIR, "taskD_installed_capacity_percent.png"),
+        dpi=300
+    )
+    plt.close(fig)
 
 
 def plot_battery_behavior(network, zone):
@@ -454,7 +499,7 @@ def plot_battery_behavior(network, zone):
     plt.title(f"Battery behavior in {zone} in {YEAR}")
     plt.tight_layout()
     plt.savefig(os.path.join(FIG_DIR, f"taskD_battery_behavior_{zone}.png"), dpi=300)
-    plt.show()
+    plt.close(fig)
 
 
 def plot_line_flows(network):
@@ -464,8 +509,9 @@ def plot_line_flows(network):
     plt.ylabel("MW")
     plt.title("HVAC line flows")
     plt.tight_layout()
-    plt.savefig(os.path.join(FIG_DIR, "taskD_line_flows.png"), dpi=300)
-    plt.show()
+    fig = plt.gcf()
+    fig.savefig(os.path.join(FIG_DIR, "taskD_line_flows.png"), dpi=300)
+    plt.close(fig)
 
 
 def print_results(network):
@@ -520,6 +566,123 @@ def print_results(network):
     print("\n--- Average annual electricity price by bus [€/MWh] ---")
     print(network.buses_t.marginal_price.mean().round(2))
 
+def plot_annual_electricity_mix(network):
+    gen_carrier_bus = {}
+
+    for carrier in network.generators.carrier.unique():
+        gens = network.generators.index[network.generators.carrier == carrier]
+        gen_carrier_bus[carrier] = (
+            network.generators_t.p[gens]
+            .sum()
+            .groupby(network.generators.loc[gens, "bus"])
+            .sum()
+        )
+
+    gen_df = pd.DataFrame(gen_carrier_bus).fillna(0.0) / 1e6  # TWh
+
+    # --- Convert to percentages ---
+    gen_pct = gen_df.div(gen_df.sum(axis=1), axis=0) * 100
+
+    # --- Enforce common order and colours ---
+    gen_pct = gen_pct.reindex(columns=TECH_ORDER, fill_value=0.0)
+    colors = [TECH_COLORS[c] for c in gen_pct.columns]
+
+    # --- Plot ---
+    fig, ax = plt.subplots(figsize=(10, 6))
+    gen_pct.plot(kind="bar", stacked=True, ax=ax, color=colors)
+
+    # --- Absolute energy labels ---
+    for i, bus in enumerate(gen_df.index):
+        ax.text(
+            i,
+            102,
+            f"{gen_df.loc[bus].sum():.1f} TWh",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax.set_ylabel("Share of annual electricity production [%]")
+    ax.set_xlabel("Zone")
+    ax.set_ylim(0, 110)
+    ax.set_title("Annual electricity mix by zone")
+    ax.legend(title="Technology", bbox_to_anchor=(1.05, 1), loc="upper left")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, "taskD_annual_electricity_mix.png"), dpi=300)
+    plt.close(fig)
+
+
+def plot_nodal_price_duration_curves(network):
+    prices = network.buses_t.marginal_price
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for bus in prices.columns:
+        ax.plot(
+            prices[bus].sort_values(ascending=False).values,
+            label=bus.replace("bus_", "")
+        )
+
+    ax.set_xlabel("Hours (sorted)")
+    ax.set_ylabel("Electricity price [€/MWh]")
+    ax.set_title("Nodal electricity price duration curves")
+    ax.legend(title="Zone")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, "taskD_nodal_price_duration_curves.png"), dpi=300)
+    plt.close(fig)
+
+
+def plot_line_loading_duration_curves(network):
+    loadings = network.lines_t.p0.abs().divide(network.lines.s_nom, axis=1) * 100
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for line in loadings.columns:
+        ax.plot(
+            loadings[line].sort_values(ascending=False).values,
+            label=line
+        )
+
+    ax.set_xlabel("Hours (sorted)")
+    ax.set_ylabel("Line loading [% of capacity]")
+    ax.set_title("Line loading duration curves")
+    ax.legend(title="Interconnector")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, "taskD_line_loading_duration_curves.png"), dpi=300)
+    plt.close(fig)
+
+
+def plot_net_imports_exports(network):
+    # --- Generation by bus (annual) ---
+    generation = (
+        network.generators_t.p
+        .T
+        .groupby(network.generators.bus)
+        .sum()
+        .sum(axis=1)
+    )
+
+    # --- Load by bus (annual) ---
+    load = network.loads_t.p.sum()
+
+    # Net imports: positive = importer, negative = exporter
+    net_imports = (load - generation) / 1e6  # TWh
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    net_imports.plot(kind="bar", ax=ax)
+
+    ax.axhline(0, color="black", linewidth=1)
+    ax.set_ylabel("Net imports [TWh]")
+    ax.set_xlabel("Zone")
+    ax.set_title("Net annual electricity imports (+) / exports (−)")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(FIG_DIR, "taskD_net_imports_exports.png"), dpi=300)
+    plt.close(fig)
 
 # ============================================================
 # Run Task D
@@ -542,9 +705,14 @@ if __name__ == "__main__":
 
     print_results(multi_n)
 
-    plot_installed_capacity(multi_n)
+    plot_installed_capacity_percent(multi_n)
 
     for zone in ZONES:
         plot_battery_behavior(multi_n, zone)
 
     plot_line_flows(multi_n)
+
+    plot_annual_electricity_mix(multi_n)
+    plot_nodal_price_duration_curves(multi_n)
+    plot_line_loading_duration_curves(multi_n)
+    plot_net_imports_exports(multi_n)
